@@ -1,5 +1,4 @@
-#include <stdint.h>
-#include <stdbool.h>
+#include "state_machine.h"
 #include <stddef.h>
 
 
@@ -28,73 +27,6 @@
 #define RECOVERY_FAILED_PERSIST_TICKS    3
 
 
-
-
-typedef enum
-{
-    POWER_OFF,
-    POWER_WAIT,
-    ANALOG_SETTLE,
-    SERVO_INIT,
-    LED_ENABLE,
-    FAST_ACQUIRE,
-    RUN,
-    SETTLING,
-    RECOVERY,
-    FAULT
-
-} supervisor_state_t;
-
-
-
-
-typedef enum
-{
-    FAULT_NONE,
-
-    FAULT_POWER_TIMEOUT,
-    FAULT_ANALOG_SETTLE_TIMEOUT,
-    FAULT_SERVO_INIT_TIMEOUT,
-    FAULT_LED_ENABLE_TIMEOUT,
-    FAULT_FAST_ACQUIRE_TIMEOUT,
-    FAULT_SETTLING_TIMEOUT,
-    FAULT_RECOVERY_TIMEOUT,
-
-    FAULT_TOO_MANY_RECOVERY_ATTEMPTS,
-
-    FAULT_UNRECOVERABLE,
-    FAULT_RECOVERY_FAILED,
-    FAULT_INVALID_STATE
-
-} supervisor_fault_t;
-
-
-
-
-typedef struct
-{
-    bool power_requested;
-    bool power_good;
-    bool analog_reference_stable;
-
-    bool cancellation_neutral;
-    bool led_confirmed_on;
-
-    // servo reports that the baseline has converged
-    // supervisor then decides when the system can enter RUN
-    bool servo_converged;
-
-    bool agc_step_occurred;
-
-    bool recoverable_condition;
-    bool unrecoverable_fault;
-
-    bool recovery_succeeded;
-    bool recovery_failed;
-
-    uint32_t now_ms; // timer
-
-} supervisor_inputs_t;
 
 
 // essentially this is the information being reported to the state machine

@@ -1,5 +1,5 @@
-#include <stdint.h>
-#include <stdbool.h>
+#include "servo.h"
+#include "state_machine.h"
 #define SERVO_VREF_INIT 0   // TODO: replace after fixed-point format is chosen
 #define BASELINE_FRAC_BITS 16 //used for making baseline fractional bits for updating servo
 #define KP_FIXED 51070 // derive from ADC scale + TIA/cancellation plant
@@ -93,7 +93,7 @@ void servo_init(void)
 static const uint32_t ALPHA_FAST_Q24 = 174773u;  // fc = 2 Hz
 static const uint32_t ALPHA_SLOW_Q24 = 4392u;   // fc = 0.05 Hz
 
-void servo_update_baseline(int32_t new_tia_sample){
+static void servo_update_baseline(int32_t new_tia_sample){
     uint32_t alpha;
     if(supervisor_servo_fast_mode()){
         alpha = ALPHA_FAST_Q24;
@@ -149,7 +149,7 @@ bool servo_is_converged(void)
     return servo.converged;
 }
 
-void servo_update_proportional(void)
+static void servo_update_proportional(void)
 {
     // I_P = Kp * error
 
@@ -163,7 +163,7 @@ void servo_update_proportional(void)
     // store result in servo.I_proportional
 }
 
-void servo_update_integral(void)
+static void servo_update_integral(void)
 {
     int64_t Ki_term;
     int64_t integral_step;
@@ -211,12 +211,12 @@ void servo_update_integral(void)
     }
 }
 
-void servo_update_cancel(void)
+static void servo_update_cancel(void)
 {
     servo.I_cancel = servo.I_integral + servo.I_proportional;
 }
 
-int64_t quantize_current(int64_t requested_current, int64_t step_size)
+static int64_t quantize_current(int64_t requested_current, int64_t step_size)
 {
     int64_t number_of_steps;
     int64_t quantized_current;
@@ -227,9 +227,7 @@ int64_t quantize_current(int64_t requested_current, int64_t step_size)
     return quantized_current;
 }
 
-int64_t quantize_current(int64_t requested_current, int64_t step_size);
-
-void servo_allocate_current(void)
+static void servo_allocate_current(void)
 {
     int64_t I_remainder;
     servo.actuator_saturated = false;
@@ -265,7 +263,7 @@ void servo_allocate_current(void)
     servo.I_actual = servo.I_coarse + servo.I_fine;
 }
 
-uint16_t current_to_pwm_code( int64_t current_q16, int64_t resistance_ohms)
+static uint16_t current_to_pwm_code(int64_t current_q16, int64_t resistance_ohms)
 {
     int64_t numerator;
     int64_t delta_v_uv;
@@ -309,10 +307,10 @@ uint16_t current_to_pwm_code( int64_t current_q16, int64_t resistance_ohms)
 
     return (uint16_t)pwm_code;
 }
-uint16_t coarse_pwm;
-uint16_t fine_pwm;
+static uint16_t coarse_pwm;
+static uint16_t fine_pwm;
 
-void servo_update_pwm_codes(void)
+static void servo_update_pwm_codes(void)
 {
     coarse_pwm = current_to_pwm_code(
         servo.I_coarse,
@@ -323,4 +321,49 @@ void servo_update_pwm_codes(void)
         servo.I_fine,
         R_FINE_OHMS
     );
+}
+
+void servo_process_sample(int32_t adc_sample)
+{
+    /*
+     * Ordering is part of the controller design:
+     *
+     * 1. Estimate the baseline and form the new error.
+     * 2. Form the proportional term from that error.
+     * 3. Update the integrator. Anti-windup intentionally uses the
+     *    previous tick's I_cancel, I_actual, and saturation result.
+     * 4. Form and allocate the new cancellation-current request.
+     * 5. Convert the allocated currents into hardware PWM codes.
+     */
+    servo_update_baseline(adc_sample);
+    servo_update_proportional();
+    servo_update_integral();
+    servo_update_cancel();
+    servo_allocate_current();
+    servo_update_pwm_codes();
+}
+
+bool servo_is_saturated(void)
+{
+    return servo.actuator_saturated;
+}
+
+int64_t servo_get_requested_current_q16(void)
+{
+    return servo.I_cancel;
+}
+
+int64_t servo_get_actual_current_q16(void)
+{
+    return servo.I_actual;
+}
+
+uint16_t servo_get_coarse_pwm_code(void)
+{
+    return coarse_pwm;
+}
+
+uint16_t servo_get_fine_pwm_code(void)
+{
+    return fine_pwm;
 }
