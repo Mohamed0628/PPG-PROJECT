@@ -1,4 +1,3 @@
-
 #include <stdint.h>
 #include <stdbool.h>
 #define SERVO_VREF_INIT 0   // TODO: replace after fixed-point format is chosen
@@ -17,6 +16,24 @@
 #define PA_Q16_TO_UV_DENOM (65536LL * 1000000LL)
 #define R_COARSE_OHMS 150000LL
 #define R_FINE_OHMS   3300000LL
+
+// TODO VALIDATION: provisional convergence threshold, in ordinary ADC codes.
+// 5000 codes is about 715 uV at the TIA with Rf = 470k, which is roughly 15%
+// of the expected 4.7 mV PPG amplitude and about 800x the 0.89 uV noise floor.
+// Replace once bench data gives the real residual baseline error at the end
+// of a fast acquisition.
+#define SERVO_CONVERGENCE_THRESHOLD_CODES 5000LL
+
+// Same threshold expressed in the Q16 format that servo.B_error uses.
+#define SERVO_CONVERGENCE_THRESHOLD_Q16 \
+    (SERVO_CONVERGENCE_THRESHOLD_CODES << BASELINE_FRAC_BITS)
+
+// TODO VALIDATION: provisional persistence, in consecutive servo updates.
+// 300 updates at 1200 SPS is 250 ms, about 3.1 time constants of the 2 Hz
+// fast estimator, so a transient dip through the threshold cannot latch
+// convergence. Validated fast settling is 0.97 s, so total time to declare
+// convergence is about 1.22 s against a 30 s supervisor timeout.
+#define SERVO_CONVERGENCE_COUNT 300u
 
 typedef struct {
 
@@ -44,6 +61,9 @@ typedef struct {
     int64_t I_actual;
     bool actuator_saturated;
 
+    uint32_t convergence_counter; // consecutive updates with acceptable B_error
+    bool converged;               // servo_converged reported to the supervisor
+
 } servo_state_t;
 
 static servo_state_t servo;
@@ -63,6 +83,9 @@ void servo_init(void)
     servo.I_fine = 0;
     servo.I_actual = 0;
     servo.actuator_saturated = false;
+
+    servo.convergence_counter = 0;
+    servo.converged = false;
 
     
 }
@@ -93,7 +116,39 @@ void servo_update_baseline(int32_t new_tia_sample){
 
     servo.B_error = -servo.baseline_q16;
 
+    /*
+     * Convergence test on the FILTERED baseline error, never on the
+     * instantaneous sample. Range comparison rather than an abs() so that
+     * INT64_MIN cannot overflow.
+     *
+     * The error must stay inside the acceptable band for
+     * SERVO_CONVERGENCE_COUNT CONSECUTIVE updates. Leaving the band at any
+     * point resets both the counter and the result, so isolated good
+     * samples can never accumulate into a convergence declaration.
+     */
+    if((servo.B_error >= -SERVO_CONVERGENCE_THRESHOLD_Q16) &&
+       (servo.B_error <=  SERVO_CONVERGENCE_THRESHOLD_Q16)){
+
+        if(servo.convergence_counter < SERVO_CONVERGENCE_COUNT){
+            servo.convergence_counter++;
+        }
+
+        if(servo.convergence_counter >= SERVO_CONVERGENCE_COUNT){
+            servo.converged = true;
+        }
+    }
+    else{
+        servo.convergence_counter = 0;
+        servo.converged = false;
+    }
+
 }
+
+bool servo_is_converged(void)
+{
+    return servo.converged;
+}
+
 void servo_update_proportional(void)
 {
     // I_P = Kp * error
