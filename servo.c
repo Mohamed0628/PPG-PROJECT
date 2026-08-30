@@ -22,7 +22,15 @@
 // of the expected 4.7 mV PPG amplitude and about 800x the 0.89 uV noise floor.
 // Replace once bench data gives the real residual baseline error at the end
 // of a fast acquisition.
-#define SERVO_CONVERGENCE_THRESHOLD_CODES 5000LL
+// FIX: 5000 codes was derived assuming B_error is a slow DC residual. In FAST
+// mode the estimator runs at 2 Hz and passes the 1.2 Hz pulse almost intact,
+// so B_error swings +/-37000 codes in steady state and the test never fires --
+// FAST_ACQUIRE times out and the system faults. The convergence test now runs
+// on a slow-filtered copy of the error (below), and this threshold is sized
+// against what that filter leaves of the pulse.
+// TODO VALIDATION: replace with measured residual error after a real
+// acquisition on skin.
+#define SERVO_CONVERGENCE_THRESHOLD_CODES 15000LL
 
 // Same threshold expressed in the Q16 format that servo.B_error uses.
 #define SERVO_CONVERGENCE_THRESHOLD_Q16 \
@@ -34,6 +42,25 @@
 // convergence. Validated fast settling is 0.97 s, so total time to declare
 // convergence is about 1.22 s against a 30 s supervisor timeout.
 #define SERVO_CONVERGENCE_COUNT 300u
+
+// Convergence-only low-pass on B_error, fc = 0.2 Hz at 1200 SPS.
+// This is not a control filter and does not feed the PI loop. It exists so
+// the convergence test measures the DC baseline rather than the heartbeat.
+// At 0.2 Hz the 1.2 Hz pulse is attenuated to 0.164, leaving about 6100 codes
+// of the +/-37000 code swing, comfortably inside the 15000 code threshold.
+// Time constant 0.80 s, so detection lags acquisition by roughly 3.7 s.
+#define CONVERGENCE_ALPHA_Q24 17560u
+
+// Actuator authority is not the binding limit: +/-11 uA through Rf = 470k is
+// +/-5.2 V, and the TIA can only swing about +/-1.65 V. Clamp the request to
+// the amplifier's headroom instead, and report that as saturation.
+// TODO VALIDATION: derive the exact number from the op-amp output swing spec.
+#define I_CANCEL_MAX_Q16 229376000000LL   // 3.5 uA
+#define I_CANCEL_MIN_Q16 (-229376000000LL)
+
+// Raw ADC magnitude above which the converter is effectively railed and the
+// servo is blind. 95% of a 24-bit signed full scale.
+#define SERVO_ADC_CLIP_CODES 7969176L
 
 typedef struct {
 
@@ -61,8 +88,10 @@ typedef struct {
     int64_t I_actual;
     bool actuator_saturated;
 
+    int64_t conv_error_q16;       // slow-filtered B_error, convergence test only
     uint32_t convergence_counter; // consecutive updates with acceptable B_error
     bool converged;               // servo_converged reported to the supervisor
+    bool adc_clipping;            // converter at or near full scale
 
 } servo_state_t;
 
@@ -84,8 +113,10 @@ void servo_init(void)
     servo.I_actual = 0;
     servo.actuator_saturated = false;
 
+    servo.conv_error_q16 = 0;
     servo.convergence_counter = 0;
     servo.converged = false;
+    servo.adc_clipping = false;
 
     
 }
@@ -103,6 +134,17 @@ static void servo_update_baseline(int32_t new_tia_sample){
     }
 
     servo.tia_value = new_tia_sample;
+
+    /*
+     * Clipping detection. Above this magnitude the converter is railed and
+     * the loop cannot see how large the real error is, so the servo response
+     * is meaningless until the disturbance passes. The supervisor needs this
+     * to mark data invalid; the servo cannot fix it.
+     */
+    servo.adc_clipping =
+        (new_tia_sample >=  SERVO_ADC_CLIP_CODES) ||
+        (new_tia_sample <= -SERVO_ADC_CLIP_CODES);
+
     int64_t sample_q16 = ((int64_t)servo.tia_value) << BASELINE_FRAC_BITS; // 64 bit version of tia value
 
     int64_t difference = sample_q16 - servo.baseline_q16;
@@ -126,8 +168,13 @@ static void servo_update_baseline(int32_t new_tia_sample){
      * point resets both the counter and the result, so isolated good
      * samples can never accumulate into a convergence declaration.
      */
-    if((servo.B_error >= -SERVO_CONVERGENCE_THRESHOLD_Q16) &&
-       (servo.B_error <=  SERVO_CONVERGENCE_THRESHOLD_Q16)){
+    int64_t conv_diff = servo.B_error - servo.conv_error_q16;
+    servo.conv_error_q16 +=
+        (conv_diff * (int64_t)CONVERGENCE_ALPHA_Q24) >> GAIN_FRAC_BITS;
+
+    if((servo.conv_error_q16 >= -SERVO_CONVERGENCE_THRESHOLD_Q16) &&
+       (servo.conv_error_q16 <=  SERVO_CONVERGENCE_THRESHOLD_Q16) &&
+       (!servo.adc_clipping)){
 
         if(servo.convergence_counter < SERVO_CONVERGENCE_COUNT){
             servo.convergence_counter++;
@@ -230,21 +277,41 @@ static int64_t quantize_current(int64_t requested_current, int64_t step_size)
 static void servo_allocate_current(void)
 {
     int64_t I_remainder;
+    int64_t I_request;
     servo.actuator_saturated = false;
 
-    I_remainder = servo.I_cancel;
+    /*
+     * Clamp the request to the TIA's usable headroom before splitting it.
+     * Previously nothing bounded the coarse path: a large request produced a
+     * control voltage that current_to_pwm_code silently clipped, while
+     * I_actual still reported the unclamped value, so actuator_saturated
+     * stayed false and anti-windup never engaged in the one case it exists
+     * for. The clamp is the real limit, so detect saturation here.
+     */
+    I_request = servo.I_cancel;
 
-    if(servo.I_cancel <= I_FINE_MAX_Q16 && servo.I_cancel >= I_FINE_MIN_Q16){
+    if(I_request > I_CANCEL_MAX_Q16){
+        I_request = I_CANCEL_MAX_Q16;
+        servo.actuator_saturated = true;
+    }
+    else if(I_request < I_CANCEL_MIN_Q16){
+        I_request = I_CANCEL_MIN_Q16;
+        servo.actuator_saturated = true;
+    }
+
+    I_remainder = I_request;
+
+    if(I_request <= I_FINE_MAX_Q16 && I_request >= I_FINE_MIN_Q16){
         servo.I_coarse = 0;
     }
     else{
         servo.I_coarse = quantize_current(
-            servo.I_cancel,
+            I_request,
             I_COARSE_STEP_Q16
         );
     }
 
-    I_remainder = servo.I_cancel - servo.I_coarse;
+    I_remainder = I_request - servo.I_coarse;
 
     if(I_remainder > I_FINE_MAX_Q16){
         I_remainder = I_FINE_MAX_Q16;
@@ -346,6 +413,11 @@ void servo_process_sample(int32_t adc_sample)
 bool servo_is_saturated(void)
 {
     return servo.actuator_saturated;
+}
+
+bool servo_is_clipping(void)
+{
+    return servo.adc_clipping;
 }
 
 int64_t servo_get_requested_current_q16(void)
