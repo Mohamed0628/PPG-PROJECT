@@ -2,9 +2,9 @@
 #include "state_machine.h"
 #define SERVO_VREF_INIT 0   // TODO: replace after fixed-point format is chosen
 #define BASELINE_FRAC_BITS 16 //used for making baseline fractional bits for updating servo
-#define KP_FIXED 51070 // derive from ADC scale + TIA/cancellation plant
-#define KI_FAST_FIXED 12751
-#define KI_SLOW_FIXED 424
+#define KP_FIXED 240000 // beta * (V_LSB / Rf), Rf = 100k
+#define KI_FAST_FIXED 60000
+#define KI_SLOW_FIXED 2000
 #define GAIN_FRAC_BITS 24
 #define I_FINE_MAX_Q16 32768000000LL // 500 nA
 #define I_FINE_MIN_Q16 (-32768000000LL) // - 500nA
@@ -18,19 +18,18 @@
 #define R_FINE_OHMS   3300000LL
 
 // TODO VALIDATION: provisional convergence threshold, in ordinary ADC codes.
-// 5000 codes is about 715 uV at the TIA with Rf = 470k, which is roughly 15%
-// of the expected 4.7 mV PPG amplitude and about 800x the 0.89 uV noise floor.
-// Replace once bench data gives the real residual baseline error at the end
-// of a fast acquisition.
-// FIX: 5000 codes was derived assuming B_error is a slow DC residual. In FAST
-// mode the estimator runs at 2 Hz and passes the 1.2 Hz pulse almost intact,
-// so B_error swings +/-37000 codes in steady state and the test never fires --
-// FAST_ACQUIRE times out and the system faults. The convergence test now runs
-// on a slow-filtered copy of the error (below), and this threshold is sized
-// against what that filter leaves of the pulse.
-// TODO VALIDATION: replace with measured residual error after a real
-// acquisition on skin.
-#define SERVO_CONVERGENCE_THRESHOLD_CODES 15000LL
+// With the ADS131M02 at gain 1, one code is about 143.05 nV. The old 15000-code
+// threshold therefore still represents about 2.146 mV electrically, but after
+// changing Rf from 470k to 100k the expected 10 nA PPG amplitude is only about
+// 1.0 mV. Leaving the threshold at 15000 codes would make it about 215% of the
+// expected PPG amplitude and much too loose. Scaling the threshold by 100/470
+// preserves approximately the old current-domain criterion: 3200 codes is about
+// 458 uV, or 45.8% of the expected 1.0 mV PPG amplitude.
+// The convergence test runs on a slow-filtered copy of B_error (below), so the
+// threshold is intentionally larger than the residual heartbeat component after
+// the 0.2 Hz convergence filter. Replace with measured residual error after a
+// real acquisition on skin.
+#define SERVO_CONVERGENCE_THRESHOLD_CODES 3200LL
 
 // Same threshold expressed in the Q16 format that servo.B_error uses.
 #define SERVO_CONVERGENCE_THRESHOLD_Q16 \
@@ -46,17 +45,20 @@
 // Convergence-only low-pass on B_error, fc = 0.2 Hz at 1200 SPS.
 // This is not a control filter and does not feed the PI loop. It exists so
 // the convergence test measures the DC baseline rather than the heartbeat.
-// At 0.2 Hz the 1.2 Hz pulse is attenuated to 0.164, leaving about 6100 codes
-// of the +/-37000 code swing, comfortably inside the 15000 code threshold.
-// Time constant 0.80 s, so detection lags acquisition by roughly 3.7 s.
+// At 100k, a 10 nA PPG current produces about 1.0 mV at the TIA. The 0.2 Hz
+// convergence filter attenuates a 1.2 Hz pulse to about 0.164 of that value,
+// leaving roughly 164 uV (about 1150 ADC codes), comfortably inside the
+// 3200-code threshold. Time constant 0.80 s, so detection lags acquisition.
 #define CONVERGENCE_ALPHA_Q24 17560u
 
-// Actuator authority is not the binding limit: +/-11 uA through Rf = 470k is
-// +/-5.2 V, and the TIA can only swing about +/-1.65 V. Clamp the request to
-// the amplifier's headroom instead, and report that as saturation.
-// TODO VALIDATION: derive the exact number from the op-amp output swing spec.
-#define I_CANCEL_MAX_Q16 229376000000LL   // 3.5 uA
-#define I_CANCEL_MIN_Q16 (-229376000000LL)
+// With Rf = 100k, the full +/-11 uA coarse-path authority moves the TIA by
+// only +/-1.1 V, inside the approximately +/-1.65 V output headroom. The TIA
+// is therefore no longer the binding limit. Clamp at the actuator's actual
+// +/-11 uA coarse-path authority so anti-windup sees the same limit the PWM
+// hardware can deliver. Bench validation should confirm usable control-voltage
+// swing and op-amp output headroom before this value is frozen.
+#define I_CANCEL_MAX_Q16 720896000000LL   // 11 uA
+#define I_CANCEL_MIN_Q16 (-720896000000LL)
 
 // Raw ADC magnitude above which the converter is effectively railed and the
 // servo is blind. 95% of a 24-bit signed full scale.
@@ -281,12 +283,11 @@ static void servo_allocate_current(void)
     servo.actuator_saturated = false;
 
     /*
-     * Clamp the request to the TIA's usable headroom before splitting it.
-     * Previously nothing bounded the coarse path: a large request produced a
-     * control voltage that current_to_pwm_code silently clipped, while
-     * I_actual still reported the unclamped value, so actuator_saturated
-     * stayed false and anti-windup never engaged in the one case it exists
-     * for. The clamp is the real limit, so detect saturation here.
+     * Clamp the request to the actuator's usable current authority before
+     * splitting it. A larger request would make current_to_pwm_code clip the
+     * control voltage while I_actual still reported the unclipped current,
+     * preventing actuator_saturated and anti-windup from reflecting the real
+     * hardware limit. Detect saturation at the actual +/-11 uA authority here.
      */
     I_request = servo.I_cancel;
 
