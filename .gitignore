@@ -1,0 +1,3 @@
+build/
+host_tests/adc_frame_test
+host_tests/fir_test
