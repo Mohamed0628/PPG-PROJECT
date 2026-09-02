@@ -56,9 +56,11 @@ The same reasoning applies to slowly varying ambient light. The baseline servo m
 
 I call the LED + photodiode assembly the **Optical Capture Source (OCS)**.
 
-The primary detector is a Vishay VEMD8083 with a 2.8 mm² active area, approximately 0.39 A/W responsivity at 525 nm, and approximately 40 pF junction capacitance at 1.65 V reverse bias. The LED is green, 525-535 nm, with a narrow beam and 5 mm center-to-center spacing from the primary detector.
+The primary detector is an ams-OSRAM SFH 2430-Z with a 7.02 mm² active area, approximately 0.14 A/W responsivity at 525 nm, and approximately 950 pF junction capacitance at the 1.65 V reverse-bias operating point. It is a Vlambda-filtered detector with a 400-900 nm spectral range and peak sensitivity near 570 nm. The Vlambda filter reduces green responsivity relative to a broadband PIN photodiode, but it also rejects near-IR ambient energy that the old detector would have admitted. The device has about 0.1 nA typical dark current and a 5 nA maximum specified at 5 V reverse bias. Dark current is DC and is removed by the baseline servo, but worst-case part variation can consume meaningful cancellation range relative to an expected pulsatile current on the order of 10 nA.
 
-The ambient reference uses a second VEMD8083 with no intended LED optical path. It is placed at least 15 mm from the LED so the injected green light has attenuated to negligible levels while the detector remains under the skin and sees approximately the same external ambient-light leakage path as the primary detector.
+The LED is green, 525-535 nm, with a narrow beam and a nominal 5 mm center-to-center spacing from the primary detector. The SFH 2430-Z package is 6.45 x 3.85 mm, substantially larger than the previous 3.2 x 2.0 mm detector, so the 5 mm spacing must be rechecked against the actual LED footprint and package orientation before layout is frozen; it is now mechanically tight rather than an assumed-safe spacing.
+
+The ambient reference uses a second SFH 2430-Z with no intended LED optical path. The nominal 15 mm LED-to-reference-detector spacing remains optically reasonable, but the larger detector package and the OCS board outline must be checked to confirm that the reference detector, isolation structures, and skin-contact area still fit without crowding.
 
 Optical crosstalk is treated as a PCB/package problem rather than only a spacing problem. The OCS uses a 1 mm routed slot through the board because FR-4 glass weave can pipe light between footprints, an opaque black epoxy dam standing roughly 1-2 mm above the board, and black soldermask.
 
@@ -80,18 +82,20 @@ $$
 
 The primary photodiode cathode is tied to 3.3 V and its anode is connected to the TIA summing node, giving approximately 1.65 V reverse bias around the nominal operating point.
 
-The current TIA uses a 470 kΩ feedback resistor, a 1 nF C0G feedback capacitor, and an OPA2325-class amplifier. The calculated minimum compensation capacitance is approximately 1.3 pF, so 1 nF is deliberately heavy compensation rather than a minimum-stability choice. It places the feedback pole around 338 Hz, still roughly 60 times above the useful PPG band, while reducing high-frequency noise gain to approximately 1.05.
+The current TIA uses a 100 kΩ feedback resistor, a 10 nF C0G feedback capacitor, and an OPA2325-class amplifier. With approximately 960 pF total inverting-node capacitance and a 10 MHz amplifier gain-bandwidth product, the estimated minimum compensation capacitance is approximately 12.36 pF. The 10 nF feedback capacitor is therefore deliberately heavy compensation rather than a minimum-stability choice. It places the feedback pole around 159 Hz, about 20 times above the 8 Hz digital passband edge, while limiting the high-frequency noise gain to approximately 1.096.
 
-At an assumed 2 µA DC photocurrent, the current noise estimate is shot-noise limited:
+The lower feedback resistance is required by the SFH 2430-Z's much larger ambient photocurrent. The detector produces about 6.3 µA at 1000 lx, so ordinary 300-500 lx indoor illumination can contribute roughly 2-3 µA before the LED is enabled. With about 1.6 V of usable output swing, 470 kΩ would clip near 3.4 µA, whereas 100 kΩ tolerates roughly 16 µA of residual current before reaching the same swing limit.
+
+At an assumed 2 µA DC photocurrent, the current-noise estimate is still shot-noise dominated, but less strongly than before:
 
 | Source | Input-referred current noise |
 |---|---:|
 | Photodiode shot noise | 0.80 pA/√Hz |
-| 470 kΩ feedback-resistor Johnson noise | 0.19 pA/√Hz |
+| 100 kΩ feedback-resistor Johnson noise | 0.41 pA/√Hz |
 | Coarse cancellation-resistor Johnson noise | 0.33 pA/√Hz |
-| Estimated total | 0.89 pA/√Hz |
+| Estimated total | 0.96 pA/√Hz |
 
-That corresponds to an estimated 74 dB SNR over a 4.5 Hz bandwidth. This is a calculated design estimate, not yet an on-skin measurement.
+The listed terms combine to about 0.96 pA/√Hz RMS spectral density. Over a 4.5 Hz bandwidth that is about 2.03 pA RMS, giving an estimated 73.8 dB SNR for a 10 nA pulsatile signal. Shot noise remains the largest single term and contributes about 70% of the listed noise power, so the front end is still reasonably described as shot-noise dominated, though the feedback-resistor contribution is no longer negligible. This is a calculated design estimate, not yet an on-skin measurement.
 
 ## Dual-Range Baseline Cancellation
 
@@ -110,9 +114,9 @@ The actuator has two ranges:
 | Coarse | 150 kΩ | ±11 µA | 1342 pA | Authority |
 | Fine | 3.3 MΩ | ±500 nA | 61 pA | Resolution |
 
-The commanded cancellation is clamped to ±3.5 µA. That limit comes from TIA output headroom, not from the actuator's electrical capability.
+The commanded cancellation is clamped to ±11 µA. With the 100 kΩ TIA feedback resistor, the full coarse-path authority corresponds to about ±1.1 V at the TIA, which remains inside the amplifier's approximate ±1.65 V headroom. The cancellation hardware, rather than TIA swing, is now the binding limit.
 
-The dual range is not just an optimization. A 1342 pA coarse step is about 13% of a 10 nA pulsatile signal and could create visible staircase artifacts. The 61 pA fine step is about 0.6% of that signal, so the fine path provides the resolution needed once the operating point is close.
+The dual range remains justified. A 1342 pA coarse step produces about 134.2 µV at the TIA with 100 kΩ feedback, while a 10 nA pulsatile signal produces about 1.0 mV. The coarse step is therefore still about 13.4% of the expected PPG signal. The 61 pA fine step produces about 6.10 µV, or about 0.61% of that signal. Lowering $R_f$ scales the actuator-step voltage and PPG voltage together, so their ratio is essentially unchanged.
 
 ## Baseline Servo
 
@@ -246,14 +250,14 @@ A separate disturbance stress test injects contact-pressure steps, drift ramps, 
 
 **The analog component values are still provisional.**
 
-The present TIA and cancellation design rests on an estimated on-skin DC photocurrent range of **0.5-5 µA** and an estimated pulsatile AC/DC ratio. Neither has been measured with this OCS on skin yet.
+The present TIA and cancellation design now accounts for the SFH 2430-Z's approximately 6.3 µA photocurrent at 1000 lx and its much larger junction capacitance, but the actual on-skin LED-generated DC photocurrent and pulsatile AC/DC ratio have still not been measured with this OCS.
 
 That means the following values must be treated as design hypotheses until hardware data exists:
 
-- 470 kΩ TIA feedback resistance
-- 1 nF feedback capacitance
+- 100 kΩ TIA feedback resistance
+- 10 nF feedback capacitance
 - coarse/fine cancellation authority
-- ±3.5 µA cancellation clamp
+- ±11 µA cancellation clamp
 - servo convergence threshold
 
 The PCB therefore keeps $R_f$ and $C_f$ on reworkable footprints. The first optical/AFE measurements are intended to determine whether the assumed photocurrent and AC/DC ratio are correct before those values are frozen.
@@ -269,17 +273,17 @@ Calculated noise and SNR values in this README are likewise design estimates, no
 | Raw PPG sample rate | 1200 SPS |
 | Processed PPG rate | 120 SPS |
 | ADC channels | 2, simultaneous |
-| Primary photodiode | Vishay VEMD8083 |
-| Ambient photodiode | Vishay VEMD8083 |
+| Primary photodiode | ams-OSRAM SFH 2430-Z |
+| Ambient photodiode | ams-OSRAM SFH 2430-Z |
 | LED wavelength | 525-535 nm |
-| LED/primary-PD spacing | 5 mm center-to-center |
-| TIA feedback resistor | 470 kΩ, provisional |
-| TIA feedback capacitor | 1 nF C0G, provisional |
+| LED/primary-PD spacing | 5 mm center-to-center, pending mechanical recheck |
+| TIA feedback resistor | 100 kΩ, provisional |
+| TIA feedback capacitor | 10 nF C0G, provisional |
 | TIA amplifier | OPA2325-class |
 | Analog reference | 1.65 V |
 | Coarse cancellation resistor | 150 kΩ |
 | Fine cancellation resistor | 3.3 MΩ |
-| Cancellation clamp | ±3.5 µA, provisional |
+| Cancellation clamp | ±11 µA, provisional |
 | FIR | 101-tap Parks-McClellan, Q23 |
 | FIR passband | 0-8 Hz |
 | FIR group delay | 5 samples at 120 SPS |
@@ -321,6 +325,6 @@ The combined ADS131M02 sinc³ and FIR response can be inspected with the analysi
 
 ## Next Hardware Milestone
 
-The next major milestone is not another round of assumed photocurrent values. It is measurement: bring up the OCS and analog front end, measure the real DC photocurrent and pulsatile AC/DC ratio on skin, verify ADC/DRDY timing and SPI integrity, and then retune $R_f$, $C_f$, cancellation authority, and convergence thresholds from those measurements.
+The next major milestone is measurement: bring up the revised SFH 2430-Z OCS and analog front end, measure real ambient and LED-generated DC photocurrent plus the pulsatile AC/DC ratio on skin, verify TIA stability with the approximately 960 pF inverting-node capacitance, verify ADC/DRDY timing and SPI integrity, and then retune $R_f$, $C_f$, cancellation authority, and convergence thresholds from those measurements.
 
 This is an **engineering prototype and is not intended for medical diagnosis or clinical use**.
