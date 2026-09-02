@@ -4,15 +4,21 @@
  */
 
 #include <string.h>
+#include "sdkconfig.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
 #include "esp_timer.h"
 #include "esp_check.h"
 #include "esp_attr.h"
+#include "esp_intr_alloc.h"
 #include "driver/gpio.h"
 
 #include "ppg_acq.h"
+
+#if CONFIG_FREERTOS_PLACE_FUNCTIONS_INTO_FLASH
+#error "PPG DRDY ISR requires CONFIG_FREERTOS_PLACE_FUNCTIONS_INTO_FLASH=n"
+#endif
 
 static const char *TAG = "ppg_acq";
 
@@ -33,7 +39,9 @@ static struct {
 
 /* ------------------------------------------------------------------ */
 /* DRDY ISR: timestamp capture + queue post only.  No SPI, no FIR.    */
-/* esp_timer_get_time() is documented ISR-safe on ESP-IDF.            */
+/* IRAM_ATTR alone is insufficient: the shared GPIO ISR service must  */
+/* use ESP_INTR_FLAG_IRAM and every ISR callee must be IRAM/ROM safe. */
+/* FreeRTOS ISR placement is enforced above; verify the final map too. */
 /* ------------------------------------------------------------------ */
 static void IRAM_ATTR drdy_isr(void *arg)
 {
@@ -116,10 +124,13 @@ static void acq_task(void *arg)
          * ISR.  The sample time is evt.t_drdy_us (captured at DRDY),
          * NOT the SPI completion time.
          *
-         * CASE A retry loop: an SPI/CRC-failed read of a conversion is
-         * re-attempted for the SAME conversion, bounded and guarded
-         * (ppg_acq_policy.h).  A retried sample keeps its original
-         * DRDY timestamp because it IS the same conversion. */
+         * CASE A retry loop: assumes another full frame read before DRDY
+         * reasserts returns the SAME conversion, so a recovered retry may
+         * keep the original DRDY timestamp.  drdy_reasserted() prevents a
+         * retry after the device indicates new conversion data are ready.
+         * TODO VALIDATION: SBAS853A 8.5.1.5, 8.5.1.9.1 and 8.5.1.11 do
+         * not explicitly guarantee same-conversion rereads.  This remains
+         * UNVERIFIED ON HARDWARE; validate before relying on case A. */
         uint32_t retries = 0;
         ppg_acq_read_decision_t decision;
         esp_err_t err;
@@ -236,10 +247,11 @@ esp_err_t ppg_acq_init(const ppg_acq_config_t *cfg)
         ESP_ERR_NO_MEM, TAG, "task");
 
     /* DRDY: falling edge marks new data (MODE.DRDY_FMT=0, active-low
-     * level; datasheet 8.5.1.5).  ISR service may already be installed
-     * by the application. */
-    esp_err_t err = gpio_install_isr_service(0);
-    if ((err != ESP_OK) && (err != ESP_ERR_INVALID_STATE)) {
+     * level; datasheet 8.5.1.5).  This layer must own installation of
+     * the shared GPIO ISR service because ESP-IDF exposes no public API
+     * to verify the allocation flags of an already-installed service. */
+    esp_err_t err = gpio_install_isr_service(ESP_INTR_FLAG_IRAM);
+    if (err != ESP_OK) {
         return err;
     }
     ESP_RETURN_ON_ERROR(gpio_set_intr_type(s.cfg.adc->cfg.pin_drdy,
